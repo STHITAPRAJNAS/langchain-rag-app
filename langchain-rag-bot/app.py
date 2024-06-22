@@ -93,7 +93,7 @@ def init_vector_store():
     # Lastly, we initialise the vector store using the split document
     vector_store = Chroma.from_documents(
         documents=document_chunks,
-        embedding=OllamaEmbeddings(),
+        embedding=OllamaEmbeddings(model='mxbai-embed-large'),
         persist_directory=str(DB_DIR),
         collection_name="pdf_v_db" # Important if you want to reference the DB later
     )
