@@ -1,6 +1,6 @@
 import streamlit as st
 from pathlib import Path
-
+import os
 from langchain_community.document_loaders.pdf import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores.chroma import Chroma
@@ -74,16 +74,19 @@ def init_vector_store():
     Returns:
         ChromaDB: Initialized vector store
     """
-    # Get the first file - in reality this would be more robust
-    files = [f for f in DATA_DIR.iterdir() if f.is_file]
+    # Get the most recently uploaded file
+    files = [f for f in DATA_DIR.iterdir() if f.is_file()]
     if not files:
         st.error("No files uploaded")
         return None
 
-    # Get the path to the first file in the directory
-    first_file = files[0].resolve()
+    # Sort files by modification time (most recent first)
+    latest_file = max(files, key=os.path.getmtime)
+
+    # Get the path to the most recently uploaded file
+    latest_file_path = latest_file.resolve()
     # Use the PDF loader in Langchain to fetch the document text
-    loader = PyPDFLoader(first_file)
+    loader = PyPDFLoader(latest_file_path)
     document = loader.load_and_split()
 
     # Now we initialise the text splitter we will use on the document
@@ -113,7 +116,7 @@ def get_related_context(vector_store: Chroma) -> RetrieverOutputLike:
     """
 
     # Specify the model to use
-    llm = Ollama(model="llama3")
+    llm = Ollama(model="llama3:8b-instruct-q8_0")
 
     # Here we are using the vector store as the source
     retriever = vector_store.as_retriever()
@@ -144,7 +147,7 @@ def get_context_aware_prompt(context_chain: RetrieverOutputLike) -> Runnable:
     """
 
     # Specify the model to use
-    llm = Ollama(model="llama3")
+    llm = Ollama(model="llama3:8b-instruct-q8_0")
 
     # A standard prompt template which combined chat history with user query
     # NOTE: You must pass the context into the system message
