@@ -1,6 +1,7 @@
 import streamlit as st
 from pathlib import Path
 import asyncio
+import os
 
 from langchain_community.document_loaders.pdf import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
