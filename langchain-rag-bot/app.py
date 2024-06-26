@@ -1,5 +1,6 @@
 import streamlit as st
 from pathlib import Path
+import asyncio
 
 from langchain_community.document_loaders.pdf import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -36,13 +37,10 @@ def persist_file(upload):
         st.success(f"File {upload.name} is successfully saved")
 
 def init_ui():
-    """
-    init_ui Initializes the UI
-    """
     st.set_page_config(page_title="Langchain RAG Bot", layout="wide")
     st.title("Langchain RAG Bot")
 
-    # Initialise session state
+    # Initialize session state
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = [
             AIMessage(content="Hello, I'm here to help. Ask me anything!")
@@ -53,50 +51,66 @@ def init_ui():
 
     with st.sidebar:
         st.header("Document Capture")
-        st.write("Please select a single document to use as context")
-        st.markdown("**Please fill the below form :**")
-        with st.form(key="Form", clear_on_submit = True):
-            uploaded_file = st.file_uploader("Upload", type=["pdf"], key="pdf_upload")
+        st.write("Please select docs to use as context")
+        st.markdown("**Please fill the below form:**")
+        with st.form(key="Form", clear_on_submit=True):
+            uploads = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
             submit = st.form_submit_button(label="Upload")
 
-        if submit:
-            persist_file(uploaded_file)
-            vector_store = init_vector_store()
-            st.session_state.vector_store = vector_store
-    if st.session_state.vector_store is not None:
-        init_chat_interface()
+        if submit and uploads:
+            for upload in uploads:
+                persist_file(upload)
+            st.session_state.vector_store = asyncio.run(init_vector_store())
+
+    # Initialize the chat interface regardless of vector store status
+    init_chat_interface()
+
+    # If vector store is not initialized, show a message
+    if st.session_state.vector_store is None:
+        st.info("Please upload documents to enable context-aware responses.")
 
 
-def init_vector_store():
+async def init_vector_store():
     """
     Initializes and returns ChromaDB vector store from document chunks
-
-    Returns:
-        ChromaDB: Initialized vector store
     """
-    # Get the first file - in reality this would be more robust
-    files = [f for f in DATA_DIR.iterdir() if f.is_file]
-    if not files:
-        st.error("No files uploaded")
-        return None
+    embedding_function = OllamaEmbeddings(model='mxbai-embed-large')
 
-    # Get the path to the first file in the directory
-    first_file = files[0].resolve()
-    # Use the PDF loader in Langchain to fetch the document text
-    loader = PyPDFLoader(first_file)
-    document = loader.load_and_split()
+    # Check if the vector store already exists
+    if os.path.exists(str(DB_DIR)) and os.listdir(str(DB_DIR)):
+        st.info("Loading existing vector store...")
+        vector_store = Chroma(
+            persist_directory=str(DB_DIR),
+            embedding_function=embedding_function,
+            collection_name="pdf_v_db"
+        )
+    else:
+        st.info("Creating new vector store...")
+        vector_store = Chroma(
+            persist_directory=str(DB_DIR),
+            embedding_function=embedding_function,
+            collection_name="pdf_v_db"
+        )
 
-    # Now we initialise the text splitter we will use on the document
-    text_splitter = RecursiveCharacterTextSplitter()
-    document_chunks = text_splitter.split_documents(document)
+    # Get existing document IDs from the vector store
+    existing_docs = set(vector_store.get()["ids"])
 
-    # Lastly, we initialise the vector store using the split document
-    vector_store = Chroma.from_documents(
-        documents=document_chunks,
-        embedding=OllamaEmbeddings(model='mxbai-embed-large'),
-        persist_directory=str(DB_DIR),
-        collection_name="pdf_v_db" # Important if you want to reference the DB later
-    )
+    # Process new files
+    files = [f for f in DATA_DIR.iterdir() if f.is_file() and f.suffix.lower() == '.pdf']
+    new_files = [f for f in files if f.name not in existing_docs]
+
+    if new_files:
+        for file in new_files:
+            loader = PyPDFLoader(str(file))
+            document = await asyncio.to_thread(loader.load_and_split)
+            text_splitter = RecursiveCharacterTextSplitter()
+            document_chunks = await asyncio.to_thread(text_splitter.split_documents, document)
+            await vector_store.aadd_documents(document_chunks)
+
+        vector_store.persist()
+        st.success(f"Added {len(new_files)} new file(s) to the vector store.")
+    else:
+        st.info("No new files to add. Using existing vector store.")
 
     return vector_store
 
@@ -161,25 +175,26 @@ def get_context_aware_prompt(context_chain: RetrieverOutputLike) -> Runnable:
     rag_chain = create_retrieval_chain(context_chain, docs_chain)
     return rag_chain
 
+from langchain_community.llms.ollama import Ollama
+
 def get_response(user_query: str) -> str:
-    """
-    Will use the query to fetch context & form a query to send to an LLM.
-    Responds with the result of the query 
+    try:
+        if st.session_state.vector_store is None:
+            llm = Ollama(model="llama3")
+            response = llm(user_query)
+            return response
 
-    Args:
-        user_query (str): Query input but user
+        context_chain = get_related_context(st.session_state.vector_store)
+        rag_chain = get_context_aware_prompt(context_chain)
 
-    Returns:
-        str: Answer from the LLM
-    """
-    context_chain = get_related_context(st.session_state.vector_store)
-    rag_chain = get_context_aware_prompt(context_chain)
-
-    res = rag_chain.invoke({
-        "chat_history": st.session_state.chat_history,
-        "input": user_query
-    })
-    return res["answer"]
+        res = rag_chain.invoke({
+            "chat_history": st.session_state.chat_history,
+            "input": user_query
+        })
+        return res["answer"]
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        return "I'm sorry, but I encountered an error while processing your request. Please try again later."
 
 
 def init_chat_interface():
